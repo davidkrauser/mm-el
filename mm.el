@@ -2,6 +2,7 @@
 
 (require 'websocket)
 (require 'json)
+(require 'url)
 
 (defgroup mm nil
   "Mattermost Client for Emacs"
@@ -21,6 +22,9 @@
 (defconst mm--ws-endpoint
   "/api/v4/websocket")
 
+(defconst mm--posts-endpoint
+  "/api/v4/posts")
+
 (defconst mm--event-type-handler-prefix
   "mm--handle-event-type-")
 
@@ -28,10 +32,12 @@
 
 (defvar mm--message-list nil)
 
+(defvar mm--message-list-count 0)
+
 (defun mm-connect ()
     (interactive)
     (setq mm--ws-client
-          (websocket-open (concat mm-url mm--ws-endpoint)
+          (websocket-open (concat "wss://" mm-url mm--ws-endpoint)
            :on-open (function mm--ws-authenticate)
            :on-close (lambda (ws) (setq mm--ws-client nil))
            :on-message (function mm--ws-process-frame))))
@@ -40,19 +46,35 @@
   (interactive)
   (when mm--ws-client (websocket-close mm--ws-client)))
 
-(defun mm-select-recent-post ()
-  (interactive)
-  (completing-read
-   "Select Post: "
-   (mapcar (lambda (msg)
-             (let* ((channel (mm--msg-get-val msg 'data 'channel_display_name))
-                    (user (mm--msg-get-val msg 'data 'sender_name))
-                    (text (mm--msg-get-val msg 'data 'post 'message)))
-               (format "%s: %s - %s" channel user text)))
-           mm--message-list)))
-
 (defun mm-reply ()
-  (interactive))
+  (interactive)
+  (let* ((selected-post (completing-read
+                        "Select Post: "
+                        (mapcar (lambda (list-item)
+                                  (let* ((index (car list-item))
+                                         (msg (cdr list-item))
+                                         (user (mm--msg-get-val msg 'data 'sender_name))
+                                         (text (mm--msg-get-val msg 'data 'post 'message)))
+                                    (format "%s: %s - %s" index user text)))
+                                mm--message-list)
+                        nil t))
+         (post-index (string-to-number (car (split-string selected-post ":"))))
+         (msg (alist-get post-index mm--message-list))
+         (post-id (mm--msg-get-val msg 'data 'post 'id))
+         (root-id (mm--msg-get-val msg 'data 'post 'root_id))
+         (channel-id (mm--msg-get-val msg 'data 'post 'channel_id))
+         (message (read-string "Message: ")))
+    (mm--create-post message channel-id (if (string= root-id "") post-id root-id))))
+
+(defun mm--create-post (message channel-id &optional root-id)
+  (let ((url-request-method "POST")
+        (url-request-extra-headers `(("Authorization" . ,(concat "Bearer " mm-pat))))
+        (url-request-data (json-encode
+                           `((channel_id . ,channel-id)
+                             (message . ,message)
+                             (root_id . ,root-id)))))
+    (url-retrieve (concat "https://" mm-url mm--posts-endpoint)
+                  (lambda (args) nil) nil t t)))
 
 (defun mm--ws-authenticate (ws)
   (websocket-send-text
@@ -96,4 +118,7 @@
          (user (mm--msg-get-val msg 'data 'sender_name))
          (text (mm--msg-get-val msg 'data 'post 'message)))
     (message "mm.el: %s: %s - %s" channel user text)
-    (setq mm--message-list (cons msg mm--message-list))))
+    (setq mm--message-list-count (1+ mm--message-list-count))
+    (setq mm--message-list
+          (cons (cons mm--message-list-count msg)
+                mm--message-list))))
